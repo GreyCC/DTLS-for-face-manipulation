@@ -200,7 +200,6 @@ class DTLS(nn.Module):
             tmp_res = self.denoise_fn(x_start[:,label.index(idx),:,:,:].to(device), step)
             loss = loss + self.MSE_loss(tmp_res, x_start[:,label.index(idx) + 1,:,:,:].to(device))
             x_recon.append(tmp_res.clone())
-        #print("ppsb")
         #x_recon = self.denoise_fn(x_in.to(device), torch.tensor(t1).float().to(device))
         '''for i in label:
             lis = []
@@ -215,27 +214,13 @@ class DTLS(nn.Module):
         #loss_smiling = torch.squeeze(loss_smiling, dim=1)[0]
         #loss_smiling[loss_smiling < 0] = 0
         #loss = loss + loss_smiling[0] * self.smiling_factor
-        '''print(x_out[0].shape)
-        img=self.tensor2im(x_out[0])
-        img.save("./x_out.jpg")
-        img=self.tensor2im(x_recon[0])
-        img.save("./recon.jpg")
-        print(x_start[:,label.index(0),:,:,:][0].shape)
-        img=self.tensor2im(x_start[:,label.index(0),:,:,:][0])
-        img.save("./x_start.jpg")
-        ### Loss function
-        print(loss)
-        print(f"t:{t[0]}")
-        print(f"t1:{t1[0]}")
-        exit(0)'''
+        
         return loss, x_recon
 
     def forward(self, x, label, *args, **kwargs):
-        #print(label)
         b, n, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
         t = torch.tensor(random.choices(range(0, len(label) - 1), k=b)).to(device)
-        #print(t)
         #t = torch.randint(1, self.num_timesteps + 1, (b,), device=device).long()
         return self.p_losses(x, t, [float(row[0]) for row in label], device, *args, **kwargs)
 
@@ -500,11 +485,6 @@ class Trainer(object):
         blur_img_set = torch.tensor([])
         hq_img_set = torch.tensor([])
 
-        # data = next(self.dl).to(self.device)
-        # utils.save_image((data+1)/2, f"{self.results_folder}/True_hr.png")
-        # data = F.interpolate(data, 32, mode="bilinear", antialias=True)
-        # utils.save_image((data+1)/2, f"{self.results_folder}/True_lr.png")
-
 
         for idx, path in enumerate(sorted(glob.glob(os.path.join(self.input_image, '*')))):
             imgname = os.path.splitext(os.path.basename(path))[0]
@@ -547,11 +527,6 @@ class Trainer(object):
     def inference(self, img, t):
         blur_img_set = torch.tensor([])
         hq_img_set = torch.tensor([])
-
-        # data = next(self.dl).to(self.device)
-        # utils.save_image((data+1)/2, f"{self.results_folder}/True_hr.png")
-        # data = F.interpolate(data, 32, mode="bilinear", antialias=True)
-        # utils.save_image((data+1)/2, f"{self.results_folder}/True_lr.png")
 
         img = cv2.imread(img, cv2.IMREAD_COLOR).astype(np.float32) / 255.
         img = torch.from_numpy(np.transpose(img[:, :, [2, 1, 0]], (2, 0, 1))).float()
