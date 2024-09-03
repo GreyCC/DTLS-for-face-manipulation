@@ -213,3 +213,17 @@ class Unet(nn.Module):
         if self.residual:
             return self.final_conv(x) + orig_x
         return self.final_conv(x)
+
+
+if __name__ == "__main__":
+    model = Unet(dim=16, dim_mults=(1, 1, 2, 4, 8, 16, 32, 64), channels=3).to("cuda:1")
+
+    param_size = 0
+    for param in model.parameters():
+        param_size += param.nelement() * param.element_size()
+    buffer_size = 0
+    for buffer in model.buffers():
+        buffer_size += buffer.nelement() * buffer.element_size()
+
+    size_all_mb = (param_size + buffer_size) / 1024**2
+    print('model size: {:.3f}MB'.format(size_all_mb))

@@ -12,6 +12,7 @@ import pyiqa
 import math
 import random
 import torchvision
+import wandb
 
 from torch import nn
 from functools import partial
@@ -20,10 +21,6 @@ from pathlib import Path
 from torch.optim import Adam
 from torchvision import transforms, utils
 from PIL import Image
-from util.discriminator import discriminator_v3 as d_3
-
-from skimage.metrics._structural_similarity import structural_similarity as compare_ssim
-from skimage.metrics.simple_metrics import peak_signal_noise_ratio as compare_psnr
 
 try:
     from apex import amp
@@ -92,7 +89,6 @@ class DTLS(nn.Module):
         *,
         image_size,
         device,
-        stochastic=False,
     ):
         super().__init__()
         self.image_size = image_size
@@ -100,128 +96,27 @@ class DTLS(nn.Module):
         self.device = device
         self.MSE_loss = nn.MSELoss()
         self.smiling_factor = 1
-        self.model = torchvision.models.resnet50(pretrained=False)
-        self.model.fc = torch.nn.Linear(self.model.fc.in_features, 2)
-
-        self.checkpoint = torch.load("../restyle-encoder/interfacegan_trained_model/model_smiling.pth")
-        #print(checkpoint)
-        self.model.load_state_dict(self.checkpoint)
-        self.model.eval()
-        self.model = self.model.to(self.device)
         
     @torch.no_grad()
-    def sample(self, batch_size=16, img=None, t=None, imgname=None, label=None, device=None):
-        if t == None:
-            t = 5
-        #print(label)
-        blur_img = img[:,label.index(0),:,:,:]
-        img_t = blur_img.clone()
-        previous_x_s0 = None
-        momentum = 0
-        it = label.index(0)
-        ####### Domain Transfer
-        #step = torch.full((batch_size,), t, dtype=torch.long).to(self.device)
-        #R_x = self.denoise_fn(img_t.to(device), step.to(device))
-        #img_t=R_x
-        #return blur_img, img_t
-        
-        while (t != label[it]):
-            dir = -1 if t < label[it] else 1
-            current_step = label[it]
-            next_step = label[it + dir]
-            print(f"Current Step of img: from {current_step} to {next_step}")
+    def sample(self, img=None, t=None):
+        R_x = self.denoise_fn(img, t)
+        return R_x
 
-            #step = torch.full((batch_size,), label[it], dtype=torch.long).to(self.device)
-            step = torch.full((batch_size,), label[it], dtype=torch.float).to(self.device)
-            momentum_l = 0
-
-            #if previous_x_s0 is None:
-            #    momentum_l = 0
-            #else:
-            #    momentum_l = self.transform_func_sample(momentum, current_step)
-
-            #weight = (1 - (current_step**2/self.image_size**2))
-            #weight = (1 - math.log(current_step + 1 - self.size_list[-1])/math.log(self.image_size))
-
-            #if previous_x_s0 is None:
-            #    R_x = self.denoise_fn(img_t, step)
-            #    # return blur_img, R_x
-            #    previous_x_s0 = R_x
-            #else:
-            #    R_x = self.denoise_fn(img_t + momentum_l, step)
-            R_x = self.denoise_fn(img_t.to(device), step.to(device))
-            
-            tmp = (R_x + 1) / 2
-            utils.save_image(tmp, str(f'./tmp_folder_dtls/{label[it]}.png'), nrow=1)
-
-
-
-            #momentum += previous_x_s0 - R_x
-            previous_x_s0 = R_x
-
-            # R_x = self.denoise_fn(img_t, step)
-
-            # utils.save_image((R_x+1)/2, f"20230103_eval/{current_step}_SR.png")
-            #x4 = self.transform_func_sample(R_x, next_step)
-            img_t = R_x
-            it = it + dir
-        return blur_img, img_t
-    
-    def tensor2im(self, var):
-        var = var.cpu().detach().transpose(0, 2).transpose(0, 1).numpy()
-        var = ((var + 1) / 2)
-        var[var < 0] = 0
-        var[var > 1] = 1
-        var = var * 255
-        return Image.fromarray(var.astype('uint8'))
     
     def p_losses(self, x_start, t, label, device):
-        #print(f"x_start shape: {x_start.shape}")
-        x_in = torch.empty(x_start.shape[:1] + x_start.shape[2:])
-        x_out = torch.empty(x_start.shape[:1] + x_start.shape[2:])
-        #print(f"x_out shape: {x_out.shape}")
-        #print(f"lanel:{label}")
-        t1 = []
         x_recon = []
-        '''for i in range(t.shape[0]):
-            #current_step = t[i]
-            x_in[i] = x_start[i][t[i]].to(device)
-            x_out[i] = x_start[i][t[i]+1].to(device)
-            t1.append(label[t[i]])'''
-        #print(torch.tensor(t1).float().to(device).shape)
-        #print(x_out.to(device).shape)
-        #print(x_start[:,label.index(0),:,:,:].shape)
-        #print(x_in.shape)
         loss = 0
         for idx in label[:-1]:
-            #print(x_start.shape)
-            #print(x_start[:,label.index(idx),:,:,:].shape)
             step = torch.full((x_start.shape[0],), idx, dtype=torch.float).to(self.device)
             tmp_res = self.denoise_fn(x_start[:,label.index(idx),:,:,:].to(device), step)
             loss = loss + self.MSE_loss(tmp_res, x_start[:,label.index(idx) + 1,:,:,:].to(device))
             x_recon.append(tmp_res.clone())
-        #x_recon = self.denoise_fn(x_in.to(device), torch.tensor(t1).float().to(device))
-        '''for i in label:
-            lis = []
-            for j in range(t.shape[0]):
-                lis.append(i)
-            tmp = self.denoise_fn(x_in.to(device), torch.tensor(lis).float().to(device))[0]
-            img = self.tensor2im(tmp)
-            img.save(f"./{i}.png")
-        exit(0)'''
-        #loss = self.MSE_loss(x_recon, x_out.to(device))
-        #loss_smiling = self.model(x_in.to(device)).data - self.model(x_recon.to(device)).data
-        #loss_smiling = torch.squeeze(loss_smiling, dim=1)[0]
-        #loss_smiling[loss_smiling < 0] = 0
-        #loss = loss + loss_smiling[0] * self.smiling_factor
-        
         return loss, x_recon
 
     def forward(self, x, label, *args, **kwargs):
         b, n, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
         t = torch.tensor(random.choices(range(0, len(label) - 1), k=b)).to(device)
-        #t = torch.randint(1, self.num_timesteps + 1, (b,), device=device).long()
         return self.p_losses(x, t, [float(row[0]) for row in label], device, *args, **kwargs)
 
 # dataset classes
@@ -256,15 +151,12 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         img_name = self.img_list[idx]
         transformed_images = []
-        #label_list = []
         for label in self.label_list:
             image_path = self.root_dir / label / img_name
             img = Image.open(image_path)
             transformed_img = self.transform(img)
             transformed_images.append(transformed_img)
-            #label_list.append(label)
         stacked_images = torch.stack(transformed_images, dim=0)
-        #print(stacked_images.shape)
         return stacked_images, self.label_list
 
 
@@ -274,6 +166,7 @@ class Trainer(object):
     def __init__(
         self,
         diffusion_model,
+        discriminator,
         folder,
         *,
         ema_decay = 0.995,
@@ -286,7 +179,6 @@ class Trainer(object):
         step_start_ema = 2000,
         update_ema_every = 10,
         save_and_sample_every = 1000,
-        input_image,
         results_folder = None,
         load_path = None,
         shuffle=True,
@@ -298,9 +190,7 @@ class Trainer(object):
 
         self.image_size = diffusion_model.image_size
 
-        self.discriminator = d_3(image_size=self.image_size, dim=24,
-                                 dim_mults=(8, 4, 4, 2, 2, 1, 1),channels=3).to(device)
-        # self.lpips = lpips.LPIPS(net='vgg').to(device)
+        self.discriminator = discriminator
 
         self.ema_model = copy.deepcopy(self.model)
         self.update_ema_every = update_ema_every
@@ -313,14 +203,13 @@ class Trainer(object):
         self.train_num_steps = train_num_steps
         self.nrow = 4
         self.metrics_list = []
-        self.input_image = input_image
 
         self.ds = Dataset(folder, image_size)
 
-        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=1))
-        #self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=1))
+        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=train_batch_size))
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr, betas=(0.9, 0.999), eps=1e-8)
         self.opt_d = Adam(self.discriminator.parameters(), lr=train_lr, betas=(0.9, 0.999), eps=1e-8)
+
         self.BCE_loss = torch.nn.BCELoss(size_average=True,reduction='none')
 
         self.step = 0
@@ -337,12 +226,12 @@ class Trainer(object):
 
         self.reset_parameters()
 
-        self.niqe = pyiqa.create_metric('niqe', device=torch.device(self.device))
-        self.MANIQA = pyiqa.create_metric('maniqa', device=torch.device(self.device))
 
         self.best_quality = 0
-        if load_path != None:
+        if load_path is not None:
             self.load(load_path)
+
+        wandb.init(project="DTLS_face_manipulation")
 
 
     def reset_parameters(self):
@@ -354,14 +243,6 @@ class Trainer(object):
             return
         self.ema.update_model_average(self.ema_model, self.model)
 
-    def save_best(self):
-        data = {
-            'step': self.step,
-            'model': self.model.state_dict(),
-            'ema': self.ema_model.state_dict(),
-            'dis': self.discriminator.state_dict()
-        }
-        torch.save(data, str(self.results_folder / f'model_best.pt'))
 
     def save_last(self):
         data = {
@@ -383,158 +264,73 @@ class Trainer(object):
 
     def train(self):
         backwards = partial(loss_backwards, self.fp16)
-
-        acc_loss = 0
         self.step = 0
         while self.step < self.train_num_steps:
-            for i in range(self.gradient_accumulate_every):
-                data, label = next(iter(self.dl))
-                data.to(self.device)
-                #print(data.shape)
-                #print(data[:,0,:,:,:].shape)
-                #score_true = self.discriminator(data[:,0,:,:,:].to(self.device))
-                #print(f"score_true:{score_true.shape}")
+            data, label = next(iter(self.dl))
+            data.to(self.device)
 
-                for i in range(data.size(1)):
-                    image = data[:, i, :, :, :].to(self.device)
-                    score_true = self.discriminator(image)
-                    image = image.detach().to('cpu')
-                    GAN_true = torch.ones_like(score_true)
-                    loss_dis_true = self.BCE_loss(score_true, GAN_true)
-                    backwards(loss_dis_true / self.gradient_accumulate_every, self.opt_d)
-                    del score_true
+            overall_gan = 0
+            overall_dis_real = 0
+            overall_dis_fake = 0
 
-
-                loss, x_recon = self.model(data.to(self.device), label)
-                #print(f"x_recon.shape:{x_recon.shape}")
-                loss_dis_false = 0
-                for img in x_recon:
-                    score_false = self.discriminator(img.detach())
-                    GAN_false = torch.zeros_like(score_false)
-                    loss_dis_false = loss_dis_false + self.BCE_loss(score_false, GAN_false)
-                backwards(loss_dis_false / self.gradient_accumulate_every, self.opt_d)
-
-                loss_gen = 0
-                for img in x_recon:
-                    score_fake = self.discriminator(img)
-                    GAN_fake = torch.ones_like(score_fake)
-                    loss_gen = loss_gen + self.BCE_loss(score_fake, GAN_fake) * 1e-3
-                backwards((loss + loss_gen) / self.gradient_accumulate_every, self.opt)
-
-                print(f'{self.step}: MSE: {loss.item()} | Generate: {loss_gen.item()} '
-                    f'| Dis real: {loss_dis_true.item()} | Dis false: {loss_dis_false.item()}')
-            
-            self.opt_d.step()
             self.opt_d.zero_grad()
+            for j in range(data.size(1)):
+                image = data[:, j, :, :, :].to(self.device)
+                t = torch.ones(self.batch_size).to(self.device) * float(label[j][0])
+                score_true = self.discriminator(image, t)
+                GAN_true = torch.ones_like(score_true)
+                overall_dis_real = overall_dis_real + self.BCE_loss(score_true, GAN_true)
+            overall_dis_real = overall_dis_real / data.size(1)
+            backwards(overall_dis_real, self.opt_d)
 
-            self.opt.step()
+            loss, x_recon = self.model(data.to(self.device), label)
+            for j in range(len(x_recon)):
+                t = torch.ones(self.batch_size).to(self.device) * float(label[j+1][0])
+                img = x_recon[j]
+                score_false = self.discriminator(img.detach(), t)
+                GAN_false = torch.zeros_like(score_false)
+                overall_dis_fake = overall_dis_fake + self.BCE_loss(score_false, GAN_false)
+            overall_dis_fake = overall_dis_fake / len(x_recon)
+            backwards(overall_dis_fake, self.opt_d)
+            self.opt_d.step()
+
             self.opt.zero_grad()
+            for j in range(len(x_recon)):
+                t = torch.ones(self.batch_size).to(self.device) * float(label[j+1][0])
+                img = x_recon[j]
+                score_fake = self.discriminator(img, t)
+                GAN_fake = torch.ones_like(score_fake)
+                overall_gan = overall_gan + self.BCE_loss(score_fake, GAN_fake) * 2e-4
+            overall_gan = overall_gan / len(x_recon)
+            loss = loss / len(x_recon)
+            backwards((loss + overall_gan), self.opt)
+            self.opt.step()
+
+            wandb.log({"MSE loss": loss.item(), "GAN loss": overall_gan.item(),
+                       "Dis real": overall_dis_real.item(), "Dis false": overall_dis_fake.item()})
 
             if self.step % self.update_ema_every == 0:
                 self.step_ema()
 
             if self.step == 0 or self.step % self.save_and_sample_every == 0:
-                data,label = next(iter(self.dl))
-                data.to(self.device)
-                input_img_set = torch.tensor([])
-                out_img_set = torch.tensor([])
-                FFHQ_quality_MANIQA = 0
-                FFHQ_quality_NIQE = 0
-                for image in data:
-                    input_img, out_img = self.ema_model.sample(batch_size=1, img=image.unsqueeze(0),label=[float(row[0]) for row in label],device=self.device)
-                    out_img = (out_img + 1) / 2
-                    input_img = (input_img + 1) /2
-                    utils.save_image(out_img, str(self.results_folder / f'temp.png'), nrow=self.nrow)
+                data, label = next(iter(self.dl))
+                input = data[:,0,:,:].to(self.device)
+                save_gt = input.clone().to("cpu")
+                ind = 0
+                list_result = input.clone()
+                for t in label[:-1]:
+                    ind +=1
+                    t = torch.ones(input.shape[0]).to(self.device) * float(t[0])
+                    print("Referencing: ", t)
+                    input = self.ema_model.sample(input, t)
+                    list_result = torch.cat((list_result, input), dim=0)
+                    save_gt = torch.cat((save_gt, data[:,ind,:,:]), dim=0)
 
-                    input_img_set = torch.cat((input_img_set, input_img.to("cpu")), dim=0)
-                    out_img_set = torch.cat((out_img_set, out_img.to("cpu")), dim=0)
-
-                    NIQE_mark = self.niqe(str(self.results_folder / f'temp.png')).item()
-                    MANIQA_mark = self.MANIQA(str(self.results_folder / f'temp.png')).item()
-
-                    FFHQ_quality_MANIQA += MANIQA_mark
-                    FFHQ_quality_NIQE += NIQE_mark
-
-                    os.remove(str(self.results_folder / f'temp.png'))
-
-                FFHQ_quality_MANIQA /= self.batch_size
-                FFHQ_quality_NIQE /= self.batch_size
-
-                img_set = torch.cat((input_img_set, out_img_set), dim=0)
-                utils.save_image(img_set, str(self.results_folder / f'{self.step}_FFHQ.png'), nrow=input_img_set.shape[0])
-
-                
-                self.metrics_list.append(f"FFHQ Images MANIQA: {FFHQ_quality_MANIQA} | NIQE: {FFHQ_quality_NIQE}")
-                
-                file = open(f"{self.results_folder}/quality.txt", 'w')
-                for line in self.metrics_list:
-                    file.write(line + "\n")
-                file.close()
-
-                #print(f'Mean of last {self.step}: {acc_loss}')
+                utils.save_image(save_gt.add(1).mul(0.5), str(self.results_folder / f'{self.step}_GT.png'), nrow=data.shape[0])
+                utils.save_image(list_result.add(1).mul(0.5), str(self.results_folder / f'{self.step}_samples.png'), nrow=data.shape[0])
+                wandb.log({"Ground truth": wandb.Image(str(self.results_folder / f'{self.step}_GT.png'))})
+                wandb.log({"Checkpoint result": wandb.Image(str(self.results_folder / f'{self.step}_samples.png'))})
                 self.save_last()
-                #acc_loss = 0
 
             self.step += 1
         print('training completed')
-
-    def evaluation(self):
-        total_quality_MANIQA = 0
-        total_quality_NIQE = 0
-        total_img = 0
-        blur_img_set = torch.tensor([])
-        hq_img_set = torch.tensor([])
-
-
-        for idx, path in enumerate(sorted(glob.glob(os.path.join(self.input_image, '*')))):
-            imgname = os.path.splitext(os.path.basename(path))[0]
-            print(idx, imgname)
-            # read image
-            print(path)
-            img = cv2.imread(path, cv2.IMREAD_COLOR).astype(np.float32) / 255.
-            img = torch.from_numpy(np.transpose(img[:, :, [2, 1, 0]], (2, 0, 1))).float()
-            img = torch.clamp((img * 255.0).round(), 0, 255) / 255.
-            img = img.unsqueeze(0).to(self.device)
-            img = img * 2 - 1
-            blur_img, img_sr = self.ema_model.sample(batch_size=1, img=img.unsqueeze(0),device=self.device)
-            img_sr = (img_sr + 1) / 2
-            blur_img = (blur_img + 1) / 2
-            utils.save_image(img_sr, str(self.results_folder /  f'{imgname}.png'), nrow=1)
-            utils.save_image(img_sr, str(self.results_folder /  f'temp.png'), nrow=self.nrow)
-
-            NIQE_mark = self.niqe(str(self.results_folder / f'temp.png')).item()
-            MANIQA_mark = self.MANIQA(str(self.results_folder / f'temp.png')).item()
-
-            os.remove(str(self.results_folder / f'temp.png'))
-
-            blur_img_set = torch.cat((blur_img_set, blur_img.to("cpu")), dim=0)
-            hq_img_set = torch.cat((hq_img_set, img_sr.to("cpu")), dim=0)
-
-            total_quality_MANIQA += MANIQA_mark
-            total_quality_NIQE += NIQE_mark
-            total_img +=1
-
-
-
-        img_set = torch.cat((blur_img_set, hq_img_set), dim=0)
-        utils.save_image(img_set, str(self.results_folder / f'{self.step}_overall.png'), nrow=blur_img_set.shape[0])
-        utils.save_image(blur_img_set, str(self.results_folder / f'lq_overall.png'), nrow=6)
-        utils.save_image(hq_img_set, str(self.results_folder / f'hq_overall.png'), nrow=6)
-
-        print(f"Avg MANIQA: {total_quality_MANIQA / total_img}, NIQE: {total_quality_NIQE / total_img}")
-        return total_quality_MANIQA / total_img, total_quality_NIQE / total_img
-    
-    def inference(self, img, t):
-        blur_img_set = torch.tensor([])
-        hq_img_set = torch.tensor([])
-
-        img = cv2.imread(img, cv2.IMREAD_COLOR).astype(np.float32) / 255.
-        img = torch.from_numpy(np.transpose(img[:, :, [2, 1, 0]], (2, 0, 1))).float()
-        img = torch.clamp((img * 255.0).round(), 0, 255) / 255.
-        img = img.unsqueeze(0).to(self.device)
-        img = img * 2 - 1
-        blur_img, img_sr = self.ema_model.sample(batch_size=1, t=t, img=img.unsqueeze(0),device=self.device)
-        img_sr = (img_sr + 1) / 2
-        blur_img = (blur_img + 1) / 2
-        utils.save_image(img_sr, str(f'tmp1.png'), nrow=1)
-        return img_sr

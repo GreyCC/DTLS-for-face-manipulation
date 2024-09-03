@@ -165,7 +165,6 @@ class Unet(nn.Module):
                 Downsample(dim_out) if not is_last else nn.Identity()
             ]))
 
-
         mid_dim = dims[-1]
         self.mid_block1 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim = time_dim)
         self.mid_attn = Residual(PreNorm(mid_dim, LinearAttention(mid_dim)))
@@ -181,24 +180,17 @@ class Unet(nn.Module):
             ]))
 
         out_dim = default(out_dim, channels)
-        self.final_conv = nn.Sequential(
-            ConvNextBlock(dim, dim),
-            nn.Conv2d(dim, out_dim, 1)
-        )
+        self.final_conv = nn.Conv2d(dim, out_dim, 1)
 
     def forward(self, x, time):
-        orig_x = x
         t = self.time_mlp(time) if exists(self.time_mlp) else None
-
         h = []
-
         for convnext, convnext2, attn, downsample in self.downs:
             x = convnext(x, t)
             x = convnext2(x, t)
             x = attn(x)
             h.append(x)
             x = downsample(x)
-
 
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
@@ -210,6 +202,153 @@ class Unet(nn.Module):
             x = convnext2(x, t)
             x = attn(x)
             x = upsample(x)
-        if self.residual:
-            return self.final_conv(x) + orig_x
         return self.final_conv(x)
+
+class UNet_v2(nn.Module):
+    def __init__(
+        self,
+        dim = 32,
+        dim_mults=(1, 2, 4, 8),
+        channels = 3,
+    ):
+        super().__init__()
+        self.channels = dim
+
+        dims = [dim, *map(lambda m: dim * m, dim_mults)]
+        in_out = list(zip(dims[:-1], dims[1:]))
+        self.model_depth = len(dim_mults)
+
+        time_dim = dim
+        self.time_mlp = nn.Sequential(
+            SinusoidalPosEmb(dim),
+            nn.Linear(dim, dim * 2),
+            nn.GELU(),
+            nn.Linear(dim * 2, dim)
+        )
+
+        self.downs = nn.ModuleList([])
+        self.ups = nn.ModuleList([])
+
+        num_resolutions = len(in_out)
+
+        self.initial = nn.Conv2d(channels, dim, 1)
+
+        for ind, (dim_in, dim_out) in enumerate(in_out):
+            self.downs.append(nn.ModuleList([
+                ConvNextBlock(dim_in, dim_out, time_emb_dim = time_dim, norm = ind != 0),
+                nn.AvgPool2d(2),
+                Residual(PreNorm(dim_out, LinearAttention(dim_out))) if ind >= (num_resolutions - 3) else nn.Identity(),
+                ConvNextBlock(dim_out, dim_out, time_emb_dim=time_dim),
+            ]))
+
+        mid_dim = dims[-1]
+        self.mid_block1 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim = time_dim)
+        self.mid_attn = Residual(PreNorm(mid_dim, LinearAttention(mid_dim)))
+        self.mid_block2 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim = time_dim)
+
+        for ind, (dim_in, dim_out) in enumerate(reversed(in_out)):
+            self.ups.append(nn.ModuleList([
+                ConvNextBlock(dim_out * 2, dim_in, time_emb_dim=time_dim, norm = ind !=0),
+                nn.Upsample(scale_factor=2, mode='nearest'),
+                Residual(PreNorm(dim_in, LinearAttention(dim_in))) if ind < 3 else nn.Identity(),
+                ConvNextBlock(dim_in, dim_in, time_emb_dim=time_dim),
+            ]))
+        self.final_conv = nn.Conv2d(dim, 3, 1)
+
+    def forward(self, x, time):
+        x = self.initial(x)
+        t = self.time_mlp(time)
+        h = []
+        for convnext, downsample, attn, convnext2 in self.downs:
+            x = convnext(x, t)
+            x = downsample(x)
+            h.append(x)
+            x = attn(x)
+            x = convnext2(x, t)
+
+        for convnext, upsample,  attn, convnext2 in self.ups:
+            x = torch.cat((x, h.pop()), dim=1)
+            x = convnext(x, t)
+            x = upsample(x)
+            x = attn(x)
+            x = convnext2(x, t)
+        return self.final_conv(x)
+
+
+class ConvNextBlock_dis(nn.Module):
+    """ https://arxiv.org/abs/2201.03545 """
+
+    def __init__(self, dim, dim_out, *, time_emb_dim = None, mult = 2, norm = True):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.GELU(),
+            nn.Linear(time_emb_dim, dim*2)
+        ) if exists(time_emb_dim) else None
+
+        self.ds_conv = nn.Conv2d(dim, dim, 7, padding = 3, groups = dim)
+
+        self.net = nn.Sequential(
+            nn.BatchNorm2d(dim) if norm else nn.Identity(),
+            nn.Conv2d(dim, dim_out * mult, 3, padding = 1),
+            nn.GELU(),
+            nn.Conv2d(dim_out * mult, dim_out, 3, padding = 1)
+        )
+
+        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+
+    def forward(self, x, time_emb = None):
+        h = self.ds_conv(x)
+
+        if exists(self.mlp):
+            assert exists(time_emb), 'time emb must be passed in'
+            condition = self.mlp(time_emb)
+            condition = rearrange(condition, 'b c -> b c 1 1')
+            weight, bias = torch.split(condition, x.shape[1],dim=1)
+            h = h * (1 + weight) + bias
+
+        h = self.net(h)
+        return h + self.res_conv(x)
+
+class discriminator_conditioned(nn.Module):
+    def __init__(
+        self,
+        dim=64,
+        dim_mults=(1, 2, 4, 8),
+        channels = 3,
+    ):
+        super().__init__()
+        dims = [channels, *map(lambda m: dim * m, dim_mults)]
+        in_out = list(zip(dims[:-1], dims[1:]))
+
+        self.downs = nn.ModuleList([])
+        self.ups = nn.ModuleList([])
+        num_resolutions = len(in_out)
+
+        time_dim = dim
+        self.time_mlp = nn.Sequential(
+            SinusoidalPosEmb(dim),
+            nn.Linear(dim, dim * 4),
+            nn.GELU(),
+            nn.Linear(dim * 4, dim)
+        )
+
+        for ind, (dim_in, dim_out) in enumerate(in_out):
+            is_last = ind >= (num_resolutions - 1)
+            self.downs.append(nn.ModuleList([
+                ConvNextBlock_dis(dim_in, dim_out, time_emb_dim = time_dim, norm = ind != 0),
+                Downsample(dim_out) if not is_last else nn.Identity(),
+                ConvNextBlock_dis(dim_out, dim_out, time_emb_dim = time_dim),
+            ]))
+
+        self.compress = nn.Conv2d(dims[-1],1,1, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x, time):
+        t = self.time_mlp(time)
+        for convnext, downsample, convnext2  in self.downs:
+            x = convnext(x, t)
+            x = downsample(x)
+            x = convnext2(x, t)
+        x = self.compress(x)
+        x = torch.flatten(x, start_dim=1)
+        return self.sigmoid(x)
